@@ -45,7 +45,7 @@ if __name__ == '__main__':
     scheduler = get_scheduler(args, optimizer)
     
     # MEI evaluator
-    mei = MEI() if args.MEI==True else None
+    mei = MEI(args) if args.MEI==True else None
     
     # MLI evaluator
     mli = MLI(args) if args.MLI==True else None
@@ -81,11 +81,10 @@ if __name__ == '__main__':
             
             for k in loss:
                 if k != 'task_loss':
-                    # print(f"[Train]{idx} {k}: {loss[k]}")
                     total_loss += loss[k]
                     
             if mli is not None:
-                mli.step_evaluate(model, outputs, data, comet_logger)
+                mli.step_evaluate(model, outputs, data, iter, logger, comet_logger)
             total_loss.backward()
                 
             model.clip_gradients(args.max_grad_norm)
@@ -177,7 +176,7 @@ if __name__ == '__main__':
         comet_logger.log_metric("best_test_f1", best_test_f1)
     
     if mli is not None:
-        mli.evaluate(comet_logger)
+        mli.evaluate(logger, comet_logger)
         
     if mei is not None:
         mei.evaluate(args, model, test_loader, logger, comet_logger, phase='Test')

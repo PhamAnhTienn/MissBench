@@ -3,11 +3,14 @@ import torch
 import copy
 from utils.utils import reformat_eval_inputs, eval_metric
 from models.loss import MaskedMSELoss, MaskedCELoss
+from itertools import combinations
 
 class MEI:
-    def __init__(self):
-        self.metrics = ['acc', 'ua', 'f1']
-        self.modal = 'AVL'
+    def __init__(self, args):
+        self.metric = args.mei_metric
+        self.modal = args.modal
+        self.subset = [''.join(c) for r in range(1, len(self.modal)) 
+            for c in combinations(self.modal, r)]
 
     def get_modal_eval(self, args, model, org_val_loader, eval_modal):
         preds, labels, masks = [], [], []
@@ -50,62 +53,40 @@ class MEI:
 
     def evaluate(self, args, model, val_loader, logger=None, comet_logger=None, phase='Val'):
         model.eval()
-        base_eval = self.get_modal_eval(
-            args, model, val_loader, eval_modal='AVL')
+        metric = self.metric
+        perf_full = self.get_modal_eval(
+            args, model, val_loader, eval_modal=self.modal)
 
-        modal_drop_eval = {m: {'acc': [], 'ua': [], 'f1': [],
-                    'mae': []} for m in self.modal}
-        for eval_modal in ['AV', 'AL', 'VL', 'A', 'V', 'L']:
+        perf_c = {m: [] for m in self.modal}
+        for eval_modal in self.subset:
             eval_res = self.get_modal_eval(
                 args, model, val_loader, eval_modal=eval_modal)
-            if comet_logger is not None:
-                for metric in self.metrics:
-                    comet_logger.log_metric(
-                        f'[{metric.upper()}]_{phase}_{eval_modal}', eval_res[metric])
             for modal in self.modal:
-                for metric in self.metrics:
-                    if modal not in eval_modal:
-                        modal_drop_eval[modal][metric].append(
-                            eval_res[metric])
-                        
-        if comet_logger is not None:
-            for metric in self.metrics:
-                comet_logger.log_metric(
-                    f'[{metric.upper()}]_{phase}_base', base_eval[metric])
-                 
-        for metric in self.metrics:   
-            norm_contr = [] 
-            for modal in modal_drop_eval:
-                base = base_eval[metric]
-                vals = modal_drop_eval[modal][metric]
-                diffs = [base - v for v in vals]
-                avg_diff = np.mean(diffs)
-                std_diff = np.std(diffs)
-                meanvstd = avg_diff / (std_diff+1e-18)
-                if comet_logger is not None:
-                    comet_logger.log_metric(
-                        f'[{metric.upper()}]_{phase} drop_meanvstd_{modal}', meanvstd)
-                    comet_logger.log_metric(
-                        f'[{metric.upper()}]_{phase} drop_meanvstd_abs_{modal}', np.abs(meanvstd))
-                norm_contr.append(np.abs(meanvstd))
+                perf_c[modal].append(
+                    eval_res[metric])
                 
-            prob_contr = [x / (sum(norm_contr)+1e-18) for x in norm_contr]
-            entropy = -np.log(sum([p*p for p in prob_contr])+1e-18)
-            mei = max(0, 1 -entropy / np.log(len(prob_contr)+1e-18))
-            if comet_logger is not None:
-                for idx, m in enumerate(self.modal):
-                    comet_logger.log_metric(
-                        f'[{metric.upper()}]_{phase}_prob_{m}', prob_contr[idx])
-                comet_logger.log_metric(
-                    f'[{metric.upper()}]_{phase} entropy', entropy)
-                comet_logger.log_metric(
-                    f'[{metric.upper()}]_{phase} MEI', mei)
-                comet_logger.log_metric(
-                    f'[{metric.upper()}]_{phase} MEI_root', mei**(1/len(self.modal)))
+        norm_contr = [] 
+        for modal in perf_c:
+            s_m = [perf_full[metric] - v for v in perf_c[modal]]
+            avg_s = np.mean(s_m)
+            std_s = np.std(s_m)
+            norm_s = avg_s / (std_s+1e-18)
+            norm_contr.append(np.abs(norm_s))
             
-            if logger is not None:
-                logger.info(
-                    f"[{metric.upper()}] [MEI] {mei:.4f}, mean_v_std A/V/L: {norm_contr}, prob_contr: {prob_contr}")
+        prob_contr = [x / (sum(norm_contr)+1e-18) for x in norm_contr]
+        entropy = -np.log(sum([p*p for p in prob_contr])+1e-18)
+        mei = max(0, 1 -entropy / np.log(len(prob_contr)+1e-18))
+        
+        if comet_logger is not None:
+            comet_logger.log_metric(
+                f'[{metric.upper()}]_{phase} MEI', mei)
+            for idx, modal in enumerate(self.modal):
+                comet_logger.log_metric(
+                    f'[{metric.upper()}]_{phase} prob_contr_{modal}', prob_contr[idx])
+
+        if logger is not None:
+            logger.info(
+                f"[{metric.upper()}] [MEI] {mei:.4f}, prob_contr{self.modal}: {prob_contr}")
         
         return mei
 
@@ -113,9 +94,8 @@ class MLI:
     def __init__(self, args):
         self.regression = args.regression
         self.modal = args.modal
-        self.iter = 0
-        self.log_iter = 100000
-        self.modal_fluc = {m: [] for m in self.modal}
+        self.log_iter = args.mli_log_iter
+        self.grad_var = {m: [] for m in self.modal}
         self.prev_grad = {m: None for m in self.modal}
         
         if self.regression:
@@ -138,7 +118,7 @@ class MLI:
         mean = torch.mean(l2_norm)
         return mean.item()
 
-    def step_evaluate(self, model, output, inputs, comet_logger=None):
+    def step_evaluate(self, model, output, inputs, iter, logger=None, comet_logger=None):
         target = model.target
         umask = model.umask
         with torch.enable_grad():
@@ -150,41 +130,46 @@ class MLI:
             if len(modal_mask.shape) < 2:
                 modal_mask = modal_mask.unsqueeze(-1)
             assert modal_mask.shape == umask.shape, f'mm:{modal_mask.shape}, um:{umask.shape}'
+            
             modal_mask = modal_mask[umask.bool()]  # [num_valid]
             modal_loss = torch.sum(all_loss*modal_mask)/torch.sum(modal_mask)
             module_grad = self.get_gradient(model, modal_loss)
-            modal_stats = self.get_modal_grad(module_grad)
+            modal_grad = self.get_modal_grad(module_grad)
             if self.prev_grad[m] is not None:
-                self.modal_fluc[m].append(np.abs(modal_stats - self.prev_grad[m]))
-                if np.isnan(self.modal_fluc[m][-1]):
-                    self.modal_fluc[m][-1] = np.abs(self.prev_grad[m])
-            self.prev_grad[m] = modal_stats
+                self.grad_var[m].append(np.abs(modal_grad - self.prev_grad[m]))
+                if np.isnan(self.grad_var[m][-1]):
+                    self.grad_var[m][-1] = np.abs(self.prev_grad[m])
+            self.prev_grad[m] = modal_grad
             
             if comet_logger is not None:
-                comet_logger.log_metric(
-                    f'[MLI] module_mean{m}', modal_stats, step=self.iter)
-                if len(self.modal_fluc[m]) > 0:
+                if len(self.grad_var[m]) > 0:
                     comet_logger.log_metric(
-                        f'[MLI] modal_fluc_{m}', self.modal_fluc[m][-1], step=self.iter)
+                        f'[MLI] modal_var_{m}', self.grad_var[m][-1], step=iter)
             
-        self.iter += 1
+            if logger is not None and iter % self.log_iter == 0:
+                if len(self.grad_var[m]) > 0:
+                    logger.info(
+                        f"[MLI] Iter {iter} modal_var_{m}: {self.grad_var[m][-1]:.6f}")
+            
 
-    def evaluate(self, comet_logger=None):
+    def evaluate(self, logger=None, comet_logger=None):
         modal = self.modal
-        modal_fluc = self.modal_fluc
+        grad_var = self.grad_var
         num_modal = len(modal)
-        total_step = len(modal_fluc[modal[0]])
+        total_step = len(grad_var[modal[0]])
         
-        base_val, diff = [], []
+        avg_var, diff = [], []
         
         for step in range(total_step):
-            step_fluc = {m: modal_fluc[m][step] for m in modal}                
-            cur_val = np.mean([step_fluc[m] for m in modal])
-            cur_diff = np.mean([np.abs(cur_val-step_fluc[m]) for m in modal])
-            base_val.append(cur_val)
+            step_fluc = {m: grad_var[m][step] for m in modal}                
+            cur_var = np.mean([step_fluc[m] for m in modal])
+            cur_diff = np.mean([np.abs(cur_var-step_fluc[m]) for m in modal])
+            avg_var.append(cur_var)
             diff.append(cur_diff)
             
-        mli = (np.mean(diff)/np.max(base_val))**(1/num_modal)
+        mli = (np.mean(diff)/np.max(avg_var))**(1/num_modal)
         if comet_logger is not None:
             comet_logger.log_metric('[MLI]', mli)
+        if logger is not None:
+            logger.info(f"[MLI]: {mli:.4f}")
         return mli

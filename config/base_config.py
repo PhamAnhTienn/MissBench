@@ -10,7 +10,7 @@ class BaseConfig(ABC):
     def __init__(self):
         self.setup_common_args()
         self.setup_model_specific_args()
-        self.setup_experimental_args()
+        self.setup_metric_args()
         
     def setup_common_args(self):
         """Common arguments for all models"""
@@ -68,12 +68,13 @@ class BaseConfig(ABC):
         """Setup model-specific arguments"""
         pass
     
-    def setup_experimental_args(self):
+    def setup_metric_args(self):
         """Setup experimental arguments"""
         self.parser.add_argument('--MEI', action='store_true', help='enable MEI evaluation')
-        self.parser.add_argument('--MEI_epoch', type=int, default=1, help='run MEI every n epochs')
+        self.parser.add_argument('--mei_epoch', type=int, default=1, help='run and log MEI every n epochs')
+        self.parser.add_argument('--mei_metric', type=str, default='ua', choices=['wa', 'ua', 'f1', 'mae'], help='the metric for MEI evaluation [wa | ua | f1 | mae]')
         self.parser.add_argument('--MLI', action='store_true', help='enable MLI evaluation')
-        pass
+        self.parser.add_argument('--mli_log_iter', type=int, default=1, help='log modality-specific variance every n iters')       
     
     def get_args(self):
         """Parse arguments and return as a namespace"""

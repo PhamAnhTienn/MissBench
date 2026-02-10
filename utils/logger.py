@@ -36,7 +36,7 @@ def get_comet_logger(exp_id, args, project_name=None):
         'epochs': args.epochs,
         'modal_MR': args.modal_MR,
         'seed': args.seed,
-        # 'modality': getattr(args, 'modality', 'N/A'),
+        'modal': args.modal,
     }
     comet_logger.log_parameters(logged_args)
     mr = '_'.join([str(x) for x in args.modal_MR])

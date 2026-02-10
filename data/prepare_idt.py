@@ -1,6 +1,7 @@
 import numpy as np
 
 def imr(modal_MR, lengths):
+    print(f'Create IMR mask with missing ratio {modal_MR}')
     num_sample = sum(lengths)
 
     count = 0
