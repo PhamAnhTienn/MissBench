@@ -62,8 +62,9 @@ class MEI:
             eval_res = self.get_modal_eval(
                 args, model, val_loader, eval_modal=eval_modal)
             for modal in self.modal:
-                perf_c[modal].append(
-                    eval_res[metric])
+                if modal not in eval_modal:
+                    perf_c[modal].append(
+                        eval_res[metric])
                 
         norm_contr = [] 
         for modal in perf_c:
